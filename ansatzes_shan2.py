@@ -207,13 +207,13 @@ class PQCAutoencoder(nn.Module):
         #    out_list.append(self.amplitude_decode(y[i]))
         #out = torch.stack(out_list, dim=0).reshape(B, T, D)
         # 1) Amplitude encode (256 → 2**num_qubits)
-        state_vectors = self.amplitude_encode(x_flat)
+        #state_vectors = self.amplitude_encode(x_flat)
 
         # 2) run QNN
         y_list = []
         for i in range(B*T):
             #xi = state_vectors[i].unsqueeze(0)  # keep batch dim
-            xi = torch.tensor(state_vectors[i], dtype=torch.complex64)
+            xi = torch.tensor(x_flat[i,:], dtype=torch.complex64)
             yi = self.qnn_torch(xi)
             y_list.append(yi)
         y = torch.stack(y_list, dim=0).reshape(B*T, -1).to(torch.complex64)
@@ -221,9 +221,8 @@ class PQCAutoencoder(nn.Module):
         # 3) decode to classical
         out_list = []
         for i in range(B*T):
-            out_list.append(self.amplitude_decode(y[i].unsqueeze(0)))
+            out_list.append(y[i].unsqueeze(0))
         out = torch.stack(out_list, dim=0).reshape(B, T, D)
-        return out
         return out
 
     # --- Save parameters ---
