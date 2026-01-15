@@ -51,42 +51,42 @@ def build_r3_ansatz(
 # -------------------------------
 # 2) Amplitude Encode / Decode
 # -------------------------------
-class AmplitudeFeatureMap(nn.Module):
-    """Normalize classical vector into quantum amplitudes"""
-    def __init__(self, num_qubits: int = 8, eps: float = 1e-12):
-        super().__init__()
-        self.num_qubits = num_qubits
-        self.dim = 2 ** self.num_qubits
-        self.eps = eps
+#class AmplitudeFeatureMap(nn.Module):
+#    """Normalize classical vector into quantum amplitudes"""
+#    def __init__(self, num_qubits: int = 8, eps: float = 1e-12):
+#        super().__init__()
+#        self.num_qubits = num_qubits
+#        self.dim = 2 ** self.num_qubits
+#        self.eps = eps
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 2**num_qubits)
-        #psi = x.to(torch.complex64)
-        psi = torch.tensor(x, dtype=torch.complex64)
-        if psi.ndim == 1:
-            psi=psi.unsqueeze(0)
-        norm = torch.linalg.norm(psi, dim=1, keepdim=True)
-        norm = torch.where(norm < self.eps, torch.tensor(1.0, device=x.device, dtype=torch.complex64), norm)
-        return psi / norm
+#    def forward(self, x: torch.Tensor) -> torch.Tensor:
+#        # x: (B, 2**num_qubits)
+#        #psi = x.to(torch.complex64)
+#        psi = torch.tensor(x, dtype=torch.complex64)
+#        if psi.ndim == 1:
+#            psi=psi.unsqueeze(0)
+#        norm = torch.linalg.norm(psi, dim=1, keepdim=True)
+#        norm = torch.where(norm < self.eps, torch.tensor(1.0, device=x.device, dtype=torch.complex64), norm)
+#        return psi / norm
 
-class AmplitudeDecode(nn.Module):
-    """Decode n-qubit state vector to classical probabilities"""
-    def __init__(self, input_dim: int = 8, output_dim: int = 256):
-        super().__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
+#class AmplitudeDecode(nn.Module):
+#    """Decode n-qubit state vector to classical probabilities"""
+#    def __init__(self, input_dim: int = 8, output_dim: int = 256):
+#        super().__init__()
+#        self.input_dim = input_dim
+#        self.output_dim = output_dim
 
-    def forward(self, y: torch.Tensor) -> torch.Tensor:
-        # y: (B, 2**input_dim) complex tensor
-        norm = torch.linalg.norm(y, dim=1, keepdim=True)
-        y_normalized = y / torch.where(norm==0, torch.tensor(1e-8, device=y.device, dtype=y.dtype), norm)
-        classical_vector = y_normalized.abs() ** 2
-        if classical_vector.shape[1] < self.output_dim:
-            padding = torch.zeros(classical_vector.shape[0], self.output_dim - classical_vector.shape[1], device=y.device)
-            classical_vector = torch.cat([classical_vector, padding], dim=1)
-        else:
-            classical_vector = classical_vector[:, :self.output_dim]
-        return classical_vector
+#    def forward(self, y: torch.Tensor) -> torch.Tensor:
+#        # y: (B, 2**input_dim) complex tensor
+#        norm = torch.linalg.norm(y, dim=1, keepdim=True)
+#        y_normalized = y / torch.where(norm==0, torch.tensor(1e-8, device=y.device, dtype=y.dtype), norm)
+#        classical_vector = y_normalized.abs() ** 2
+#        if classical_vector.shape[1] < self.output_dim:
+#            padding = torch.zeros(classical_vector.shape[0], self.output_dim - classical_vector.shape[1], device=y.device)
+#            classical_vector = torch.cat([classical_vector, padding], dim=1)
+#        else:
+#            classical_vector = classical_vector[:, :self.output_dim]
+#        return classical_vector
 
 # -------------------------------
 # 3) Complex Leaky ReLU
@@ -124,8 +124,8 @@ class PQCAutoencoder(nn.Module):
         
         #print(type(layers), layers)
         # amplitude encode / decode
-        self.amplitude_encode = AmplitudeFeatureMap(data_qubits)
-        self.amplitude_decode = AmplitudeDecode(data_qubits, 2**data_qubits)
+        #self.amplitude_encode = AmplitudeFeatureMap(data_qubits)
+        #self.amplitude_decode = AmplitudeDecode(data_qubits, 2**data_qubits)
 
         # ZZ feature map or AngleFeather Map 
         #self.fm = ZZFeatureMap(feature_dimension=data_qubits, reps=1, entanglement='linear')
@@ -216,7 +216,7 @@ class PQCAutoencoder(nn.Module):
             xi = torch.tensor(state_vectors[i], dtype=torch.complex64)
             yi = self.qnn_torch(xi)
             y_list.append(yi)
-        y = torch.stack(y_list, dim=0).reshape(B*T, -1)
+        y = torch.stack(y_list, dim=0).reshape(B*T, -1).to(torch.complex64)
 
         # 3) decode to classical
         out_list = []
