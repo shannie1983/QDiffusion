@@ -49,45 +49,51 @@ def build_r3_ansatz(
                 qc.cx(num_qubits - 1, 0)
     return qc, list(theta)
 
-# -------------------------------
-# 2) Amplitude Encode / Decode
-# -------------------------------
-#class AmplitudeFeatureMap(nn.Module):
-#    """Normalize classical vector into quantum amplitudes"""
-#    def __init__(self, num_qubits: int = 8, eps: float = 1e-12):
-#        super().__init__()
-#        self.num_qubits = num_qubits
-#        self.dim = 2 ** self.num_qubits
-#        self.eps = eps
+def compress_256d_to_8qubits(p):  # p: (batch,256)
+    """
+    Map 256D probability vector to 8 qubit Z-expectation values.
+    Each qubit's Z expectation is sum over probabilities of 256 states,
+    weighted by +1/-1 depending on the qubit being 0 or 1 in that state.
+    """
+    batch = p.shape[0]
 
-#    def forward(self, x: torch.Tensor) -> torch.Tensor:
-#        # x: (B, 2**num_qubits)
-#        #psi = x.to(torch.complex64)
-#        psi = torch.tensor(x, dtype=torch.complex64)
-#        if psi.ndim == 1:
-#            psi=psi.unsqueeze(0)
-#        norm = torch.linalg.norm(psi, dim=1, keepdim=True)
-#        norm = torch.where(norm < self.eps, torch.tensor(1.0, device=x.device, dtype=torch.complex64), norm)
-#        return psi / norm
+    # Build z_matrix: 256 x 8
+    # Each row = one computational basis state
+    # Each column = qubit Z value (+1 for |0>, -1 for |1>)
+    z_matrix = torch.zeros(256, 8, dtype=p.dtype, device=p.device)
+    for i in range(256):
+        bits = [(i >> (7-j)) & 1 for j in range(8)]  # MSB=qubit0
+        z_matrix[i, :] = torch.tensor([1 if b==0 else -1 for b in bits], dtype=p.dtype)
 
-#class AmplitudeDecode(nn.Module):
-#    """Decode n-qubit state vector to classical probabilities"""
-#    def __init__(self, input_dim: int = 8, output_dim: int = 256):
-#        super().__init__()
-#        self.input_dim = input_dim
-#        self.output_dim = output_dim
+    # Compute Z expectations: batch matmul p @ z_matrix
+    # p shape: (batch,256), z_matrix: (256,8)
+    z_exp = p @ z_matrix  # shape: (batch,8)
 
-#    def forward(self, y: torch.Tensor) -> torch.Tensor:
-#        # y: (B, 2**input_dim) complex tensor
-#        norm = torch.linalg.norm(y, dim=1, keepdim=True)
-#        y_normalized = y / torch.where(norm==0, torch.tensor(1e-8, device=y.device, dtype=y.dtype), norm)
-#        classical_vector = y_normalized.abs() ** 2
-#        if classical_vector.shape[1] < self.output_dim:
-#            padding = torch.zeros(classical_vector.shape[0], self.output_dim - classical_vector.shape[1], device=y.device)
-#            classical_vector = torch.cat([classical_vector, padding], dim=1)
-#        else:
-#            classical_vector = classical_vector[:, :self.output_dim]
-#        return classical_vector
+    # Normalize by sum of probabilities to ensure Z in [-1,1]
+    z_exp = z_exp / p.sum(dim=1, keepdim=True)
+
+    return z_exp  # shape: (batch,8)
+
+def decompress_8qubits_to_256(z_exp):
+    """
+    Approximate reconstruction of 256D probabilities from 8 qubit Z-expectations.
+    z_exp: shape (batch,8), values in [-1,1]
+    """
+    batch = z_exp.shape[0]
+    n_qubits = 8
+    # Map Z expectation [-1,1] → p0 = probability qubit=0
+    p0 = (1 + z_exp)/2  # shape (batch,8)
+    p1 = 1 - p0         # probability qubit=1
+
+    # Compute 256D probabilities assuming independent qubits
+    probs = torch.zeros(batch, 2**n_qubits, device=z_exp.device)
+    for i in range(2**n_qubits):
+        bits = [(i >> (7-j)) & 1 for j in range(8)]  # MSB=qubit0
+        prob = torch.ones(batch, device=z_exp.device)
+        for q in range(n_qubits):
+            prob *= p0[:,q] if bits[q]==0 else p1[:,q]
+        probs[:,i] = prob
+    return probs  # shape (batch,256)
 
 # -------------------------------
 # 3) Complex Leaky ReLU
