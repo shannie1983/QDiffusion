@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from qiskit import QuantumCircuit
@@ -8,9 +9,9 @@ from qiskit_ibm_runtime import EstimatorV2 as IBMEstimator
 from qiskit_aer.primitives import Estimator as AerEstimator
 #from qiskit_aer import AerSimulator
 from qiskit.primitives import StatevectorEstimator as Estimator
-from qiskit_machine_learning.neural_networks import EstimatorQNN
+from qiskit_machine_learning.neural_networks import EstimatorQNN, SamplerQNN
 from qiskit_machine_learning.connectors import TorchConnector
-from qiskit.quantum_info import SparsePauliOp
+from qiskit.quantum_info import SparsePauliOp, Operator
 from qiskit.circuit.library import ZZFeatureMap
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit_machine_learning.circuit.library import raw_feature_vector
@@ -121,16 +122,6 @@ class PQCAutoencoder(nn.Module):
         self.trash_qubits = trash_qubits
         self.total_qubits = data_qubits # + trash_qubits
         self.device = device
-        
-        #print(type(layers), layers)
-        # amplitude encode / decode
-        #self.amplitude_encode = AmplitudeFeatureMap(data_qubits)
-        #self.amplitude_decode = AmplitudeDecode(data_qubits, 2**data_qubits)
-
-        # ZZ feature map or AngleFeather Map 
-        #self.fm = ZZFeatureMap(feature_dimension=data_qubits, reps=1, entanglement='linear')
-        self.fm = raw_feature_vector(2 ** (data_qubits))
-
         if isinstance(layers, int):
             layers = [layers] * 3
         elif isinstance(layers, (list, tuple)):
@@ -138,14 +129,28 @@ class PQCAutoencoder(nn.Module):
                 raise ValueError("layers must have exactly 3 integers")
         else:
             raise TypeError("layers must be an int or a list/tuple of 3 integers")
-        
         layers1, layers2, layers3 = layers
 
-        # Ansatz parameterization:  build 3-layer R3 ansatz
+        # define the training circuit 
+        self.qc = QuantumCircuit(data_qubits)
+
+        # ZZ feature map or AngleFeather Map or Amplitude 
+        #self.fm = ZZFeatureMap(feature_dimension=data_qubits, reps=1, entanglement='linear')
+        #self.fm = raw_feature_vector(2 ** (data_qubits)) # note raw_feature_vector pair with SamplerQNN for the back of 2**data_qubits probability to compare with inputs
+        
+        # Angle encoding: map each inputs dimension to a rotation
+        x = ParameterVector("x", 2**(data_qubits)) # 2**(data_qubits) inputs
+        for i in range(data_qubits):
+            for j in range(i, 2**(data_qubits), data_qubits):
+                self.qc.ry(x[j], i)
+
+        # trainable layers
         self.U1, self.th1 = build_r3_ansatz(data_qubits, layers1, name='θ1', entanglement= entanglement)
         self.U2, self.th2 = build_r3_ansatz(data_qubits - trash_qubits, layers2, name='θ2', entanglement= entanglement)
         self.U3, self.th3 = build_r3_ansatz(data_qubits, layers3, name='θ3', entanglement= entanglement)
-        
+        self.weight_param_count = len(self.th1) + len(self.th2) + len(self.th3)
+        self.weights = nn.Parameter(torch.randn(self.weight_param_count, dtype=torch.float))
+
         # Ansatz build
         self.ansatz = QuantumCircuit(data_qubits)
         self.ansatz.compose(self.U1, range(data_qubits), inplace=True)
@@ -156,20 +161,22 @@ class PQCAutoencoder(nn.Module):
         self.ansatz.barrier()
 
         # full circuit
-        self.qc = QuantumCircuit(self.data_qubits)
-        self.qc.compose(self.fm, qubits=range(data_qubits), inplace=True) # amplitude_featuremap
+        #self.qc.compose(self.fm, qubits=range(data_qubits), inplace=True) # amplitude_featuremap
         self.qc.compose(self.ansatz, range(data_qubits), inplace=True) # PQC machine learning model
 
-        # create Z observable on each data qubit
-        self.observables = [
-        SparsePauliOp("".join(['Z' if i == j else 'I' for i in range(self.data_qubits)]))
-            for j in range(self.data_qubits)
-        ]
-
+        # Create 2^n projectors as observables: |i><i|
+        self.observables = []
+        for i in range(2**data_qubits):
+            proj = np.zeros((2**data_qubits, 2**data_qubits), dtype=complex)
+            proj[i, i] = 1.0
+            obs = SparsePauliOp.from_operator(Operator(proj))
+            self.observables.append(obs)
+        
         self.weight_params = self.ansatz.parameters # trainable parameters number
-        self.data_params = self.fm.parameters # inputs num that connect to ansatz
+        self.data_params = x
+        #self.data_params = self.fm.parameters # inputs num that connect to ansatz
         # where self.weight_params == self.data_params
-
+        
         # QNN
         self.estimator = Estimator() 
         #self.estimator = AerEstimator()
@@ -179,50 +186,45 @@ class PQCAutoencoder(nn.Module):
             circuit=self.qc,
             input_params=self.data_params,
             weight_params=self.weight_params,
-            observables=self.observables,
+            observables=self.observables, # this is the observable.
             input_gradients=True,
             estimator=self.estimator
         )
+
+        # return 2**data_qubit probability easier
+        #self.qnn = SamplerQNN(
+        #    circuit = self.qc,
+        #    input_params = self.data_params,
+        #    weight_params = self.weight_params
+        #    )
         self.qnn_torch = TorchConnector(self.qnn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, D = x.shape
-        x_flat = x.reshape(B*T, D)
-
-        # 1) Amplitude encode
-        #state_circuits = [self.amplitude_encode(x_flat[i].cpu().numpy()) for i in range(B*T)]
-        # TODO: each state_circuit can be run through QNN
-
-        # 2) run QNN (simulator)
+        x_flat = x.reshape(B*T, D).to(torch.complex64)
+        #self.weights = nn.Parameter(torch.randn(len(self.weight_params)))
+        # 2) run QNN
         #y_list = []
         #for i in range(B*T):
-        #    xi = torch.tensor(state_circuits[i], dtype=torch.float32)
-        #    yi = self.qnn_torch(xi.squeeze())
+        #    #xi = state_vectors[i].unsqueeze(0)  # keep batch dim
+        #    xi = torch.tensor(x_flat[i,:], dtype=torch.complex64)
+        #    #yi = self.qnn_torch(xi)
+        #    yi = self.qnn.foward(xi)
         #    y_list.append(yi)
-        #y = torch.stack(y_list, dim=0)
-        
-        # 3) amplitude decode to classical vector
+        #y = torch.stack(y_list, dim=0).reshape(B*T, -1).to(torch.complex64)
+        #print('y shape', y.shape)
+        ## 3) decode to classical
         #out_list = []
         #for i in range(B*T):
-        #    out_list.append(self.amplitude_decode(y[i]))
-        #out = torch.stack(out_list, dim=0).reshape(B, T, D)
-        # 1) Amplitude encode (256 → 2**num_qubits)
-        #state_vectors = self.amplitude_encode(x_flat)
-
-        # 2) run QNN
-        y_list = []
-        for i in range(B*T):
-            #xi = state_vectors[i].unsqueeze(0)  # keep batch dim
-            xi = torch.tensor(x_flat[i,:], dtype=torch.complex64)
-            yi = self.qnn_torch(xi)
-            y_list.append(yi)
-        y = torch.stack(y_list, dim=0).reshape(B*T, -1).to(torch.complex64)
-
-        # 3) decode to classical
-        out_list = []
-        for i in range(B*T):
-            out_list.append(y[i].unsqueeze(0))
-        out = torch.stack(out_list, dim=0).reshape(B, T, D)
+        #    out_list.append(y[i])
+        #out = torch.stack(out_list, dim=0)
+        #print('out shape:', out.shape)
+        #print('x_flat shape:', x_flat.shape)
+        #print('x shape:', x.shape)
+       
+        out = self.qnn_torch(x_flat)
+        out = out.reshape(B, T, D)
+        print(out.shape)
         return out
 
     # --- Save parameters ---
